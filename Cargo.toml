@@ -1,0 +1,11 @@
+[package]
+name = "bluetooth_wrapper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.42", features = ["full"] }  # Async runtime support
+# Enable all necessary features for a complete Bluetooth experience
+bluer = { version = "0.17.3", features = ["bluetoothd", "id"] }
+clap = { version = "4.4", features = ["derive"] }  # Command-line argument parsing
+futures = "0.3"  # Utilities for working with async code
