@@ -1,0 +1,2 @@
+I am creatinga simple rust app, specifically a bluetooth wrapper. I basically just want to make connecting to bluetooth simple for myself, I wish to execute a few commands in the terminal and with that do semi complex tasks that would require more complex commands. I wish to make the program in Rust.
+I am completely new to rust, please use comments for a 2 line explanation of what you are doing. And where you think needed, line comment of why you are doing it, aswell as basic good practices.
