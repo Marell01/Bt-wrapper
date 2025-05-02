@@ -5,7 +5,10 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.42", features = ["full"] }  # Async runtime support
-# Enable all necessary features for a complete Bluetooth experience
-bluer = { version = "0.17.3", features = ["bluetoothd", "id"] }
+# Enable the bluetoothd feature which provides the Result type and other functionality
+bluer = { version = "0.17.3", features = ["bluetoothd"] }
 clap = { version = "4.4", features = ["derive"] }  # Command-line argument parsing
 futures = "0.3"  # Utilities for working with async code
+dialoger = "0.11"  # Terminal user interface for menus
+text_io = "0.1"    # Simple text input
+console = "0.15"   # Terminal colors and utility

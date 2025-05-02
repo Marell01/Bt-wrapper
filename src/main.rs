@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 #[command(about = "Bluetooth command line utility", long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 /// Available Bluetooth commands
@@ -76,16 +76,17 @@ fn main() {
     
     // Execute the requested command
     match &cli.command {
-        Commands::Version => show_version(),
-        Commands::List => list_devices(),
-        Commands::Connect { address } => connect_device(address),
-        Commands::Disconnect { address } => disconnect_device(address),
-        Commands::Scan { duration } => scan_devices(*duration),
-        Commands::Power => power_on(),
-        Commands::Poweroff => power_off(),
-        Commands::Info => show_info(),
-        Commands::Pair { address } => pair_device(address),
-        Commands::Remove { address } => remove_device(address),
+        Some(Commands::Version) => show_version(),
+        Some(Commands::List) => list_devices(),
+        Some(Commands::Connect { address }) => connect_device(address),
+        Some(Commands::Disconnect { address }) => disconnect_device(address),
+        Some(Commands::Scan { duration }) => scan_devices(*duration),
+        Some(Commands::Power) => power_on(),
+        Some(Commands::Poweroff) => power_off(),
+        Some(Commands::Info) => show_info(),
+        Some(Commands::Pair { address }) => pair_device(address),
+        Some(Commands::Remove { address }) => remove_device(address),
+        None => interactive_menu(), // Default when no subcommand is provided
     }
 }
 
