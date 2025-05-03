@@ -5,7 +5,10 @@ use std::process::Command;
 use std::str;
 use std::thread;
 use std::time::Duration;
+use std::io::{self, Write};
 use clap::{Parser, Subcommand};
+use console::{style, Term};
+use text_io::read;
 
 /// Bluetooth command-line wrapper
 #[derive(Parser)]
@@ -80,7 +83,7 @@ fn main() {
         Some(Commands::List) => list_devices(),
         Some(Commands::Connect { address }) => connect_device(address),
         Some(Commands::Disconnect { address }) => disconnect_device(address),
-        Some(Commands::Scan { duration }) => scan_devices(*duration),
+        Some(Commands::Scan { duration }) => scan_devices((*duration).into()),
         Some(Commands::Power) => power_on(),
         Some(Commands::Poweroff) => power_off(),
         Some(Commands::Info) => show_info(),
@@ -188,15 +191,130 @@ fn disconnect_device(address: &str) {
     }
 }
 
-/// Scan for Bluetooth devices
-fn scan_devices(duration: u8) {
-    println!("Scanning for Bluetooth devices for {} seconds...", duration);
+/// Enhanced scan for Bluetooth devices with separate paired and discovered device lists
+fn enhanced_scan_devices(duration_seconds: u64) {
+    // Get list of already paired devices before scanning
+    let paired_devices = get_available_devices();
+    let paired_addresses: Vec<String> = paired_devices.iter()
+        .map(|(addr, _)| addr.clone())
+        .collect();
+    
+    // Start scan
+    match run_bluetoothctl_interactive("scan on") {
+        Ok(_) => {
+            // Visual feedback that scanning is in progress
+            print!("Scanning");
+            for _ in 0..duration_seconds {
+                print!(".");
+                io::stdout().flush().unwrap();
+                thread::sleep(Duration::from_secs(1));
+            }
+            println!();
+            
+            // Stop scan
+            match run_bluetoothctl_interactive("scan off") {
+                Ok(_) => {
+                    // Get devices after scanning
+                    match run_bluetoothctl(&["devices"]) {
+                        Ok(output) => {
+                            let mut discovered_devices: Vec<(String, String)> = Vec::new();
+                            
+                            // Process and categorize all devices
+                            for line in output.lines() {
+                                if line.starts_with("Device") {
+                                    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                                    if parts.len() >= 3 {
+                                        let addr = parts[1].to_string();
+                                        let name = parts[2].to_string();
+                                        
+                                        // If not in paired_addresses, it's newly discovered
+                                        if !paired_addresses.contains(&addr) {
+                                            discovered_devices.push((addr, name));
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Display paired devices
+                            println!();
+                            println!("{}", style("Paired Devices:").bold().green());
+                            println!("{}", style("----------------------------").green());
+                            if paired_devices.is_empty() {
+                                println!("  {}", style("No paired devices").dim());
+                            } else {
+                                for (i, (addr, name)) in paired_devices.iter().enumerate() {
+                                    println!("  {}. {} ({})", i+1, style(name).green(), addr);
+                                }
+                            }
+                            
+                            // Display newly discovered devices
+                            println!();
+                            println!("{}", style("Newly Discovered Devices:").bold().cyan());
+                            println!("{}", style("----------------------------").cyan());
+                            if discovered_devices.is_empty() {
+                                println!("  {}", style("No new devices discovered").dim());
+                            } else {
+                                for (i, (addr, name)) in discovered_devices.iter().enumerate() {
+                                    println!("  {}. {} ({})", i+1, style(name).cyan(), addr);
+                                }
+                            }
+                            
+                            // Offer connection option for newly discovered devices
+                            if !discovered_devices.is_empty() {
+                                println!();
+                                println!("Would you like to pair with a newly discovered device? (y/n)");
+                                print!("Choice: ");
+                                io::stdout().flush().unwrap();
+                                
+                                let term = Term::stdout();
+                                let choice = term.read_char().unwrap_or('n');
+                                
+                                if choice == 'y' || choice == 'Y' {
+                                    println!();
+                                    println!("Select a device to pair with:");
+                                    for (i, (_, name)) in discovered_devices.iter().enumerate() {
+                                        println!("  {}. {}", i+1, name);
+                                    }
+                                    println!("  q. Cancel");
+                                    
+                                    print!("Choice: ");
+                                    io::stdout().flush().unwrap();
+                                    let dev_choice = term.read_char().unwrap_or('q');
+                                    
+                                    if dev_choice == 'q' || dev_choice == 'Q' {
+                                        return;
+                                    }
+                                    
+                                    if let Some(idx) = dev_choice.to_digit(10) {
+                                        let idx = idx as usize;
+                                        if idx > 0 && idx <= discovered_devices.len() {
+                                            let (addr, name) = &discovered_devices[idx-1];
+                                            println!("\nPairing with {}...", name);
+                                            pair_device(addr);
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        Err(err) => println!("Error listing devices: {}", err),
+                    }
+                },
+                Err(err) => println!("Error stopping scan: {}", err),
+            }
+        },
+        Err(err) => println!("Error starting scan: {}", err),
+    }
+}
+
+/// Scan for Bluetooth devices (basic version)
+fn scan_devices(duration_seconds: u64) {
+    println!("Scanning for Bluetooth devices for {} seconds...", duration_seconds);
     
     // Start scan
     match run_bluetoothctl_interactive("scan on") {
         Ok(_) => {
             // Sleep for the specified duration
-            thread::sleep(Duration::from_secs(duration as u64));
+            thread::sleep(Duration::from_secs(duration_seconds));
             
             // Stop scan
             match run_bluetoothctl_interactive("scan off") {
@@ -227,6 +345,44 @@ fn scan_devices(duration: u8) {
             }
         },
         Err(err) => println!("Error starting scan: {}", err),
+    }
+}
+
+/// Terminate Bluetooth adapter at hardware level using rfkill
+fn terminate_bluetooth_hardware() {
+    let output = Command::new("rfkill")
+        .args(&["block", "bluetooth"])
+        .output();
+        
+    match output {
+        Ok(o) => {
+            if o.status.success() {
+                println!("Bluetooth adapter blocked at hardware level.");
+            } else {
+                println!("Failed to block Bluetooth: {}", String::from_utf8_lossy(&o.stderr));
+            }
+        },
+        Err(e) => println!("Error running rfkill: {}", e),
+    }
+}
+
+/// Start Bluetooth adapter at hardware level using rfkill
+fn start_bluetooth_hardware() {
+    let output = Command::new("rfkill")
+        .args(&["unblock", "bluetooth"])
+        .output();
+        
+    match output {
+        Ok(o) => {
+            if o.status.success() {
+                println!("Bluetooth adapter unblocked at hardware level.");
+                // Also try to power on using bluetoothctl
+                power_on();
+            } else {
+                println!("Failed to unblock Bluetooth: {}", String::from_utf8_lossy(&o.stderr));
+            }
+        },
+        Err(e) => println!("Error running rfkill: {}", e),
     }
 }
 
@@ -297,6 +453,313 @@ fn remove_device(address: &str) {
         },
         Err(err) => println!("Error removing device: {}", err),
     }
+}
+
+/// Unblock Bluetooth at hardware level - runs on startup
+fn ensure_bluetooth_unblocked() {
+    // Run rfkill to ensure Bluetooth is unblocked after system restart
+    let _ = Command::new("rfkill")
+        .args(&["unblock", "bluetooth"])
+        .output(); // We don't check the result - just try it
+}
+
+/// Run interactive Bluetooth menu
+fn interactive_menu() {
+    let term = Term::stdout();
+    
+    // Ensure Bluetooth is unblocked at hardware level at startup
+    ensure_bluetooth_unblocked();
+    
+    loop {
+        // Clear the terminal
+        let _ = term.clear_screen();
+        
+        println!("{}", style("Bluetooth Manager").bold().cyan());
+        println!("{}", style("================").cyan());
+        
+        // Check Bluetooth hardware status
+        let power_status = is_bluetooth_powered();
+        let power_text = if power_status {
+            style("ON").green().bold()
+        } else {
+            style("OFF").red().bold()
+        };
+        
+        println!("{} {}", style("Bluetooth Hardware Status:").bold(), power_text);
+        
+        // Only show connected devices if Bluetooth is powered on
+        if power_status {
+            // Get connected devices
+            let connected_devices = get_connected_devices();
+            
+            println!();
+            if connected_devices.is_empty() {
+                println!("{}", style("No devices connected").yellow());
+            } else {
+                println!("{}", style("Connected Devices:").bold());
+                for (index, (address, name)) in connected_devices.iter().enumerate() {
+                    println!("  {}. {} ({})", index + 1, style(name).green(), address);
+                }
+            }
+            
+            // Show menu options based on connection state
+            println!();
+            println!("{}", style("Options:").bold());
+            
+            if power_status {
+                println!("  1. {}", style("Turn Bluetooth OFF").red());
+                
+                if !connected_devices.is_empty() {
+                    println!("  2. {}", style("Disconnect from device").yellow());
+                    println!("  3. {}", style("Connect to another device").green());
+                } else {
+                    println!("  2. {}", style("Connect to a device").green());
+                }
+                
+                println!("  6. {}", style("Scan for devices").cyan());
+                println!("  t. {}", style("Terminate Bluetooth adapter (hardware)").red().bold());
+                println!("  r. {}", style("Restart Bluetooth adapter (hardware)").yellow());
+            } else {
+                println!("  1. {}", style("Turn Bluetooth ON").green());
+                println!("  s. {}", style("Start Bluetooth adapter (hardware)").green().bold());
+            }
+            
+            println!("  q. {}", style("Quit").red());
+            
+            // Get user choice without waiting for Enter
+            print!("\nEnter your choice: ");
+            io::stdout().flush().unwrap();
+            let choice = term.read_char().unwrap_or('x');
+            
+            match choice {
+                '1' => {
+                    if power_status {
+                        power_off();
+                        println!("Turned Bluetooth OFF. Press Enter to continue...");
+                    } else {
+                        power_on();
+                        println!("Turned Bluetooth ON. Press Enter to continue...");
+                    }
+                    wait_for_enter();
+                },
+                '2' => {
+                    if power_status {
+                        if !connected_devices.is_empty() {
+                            // Disconnect option
+                            if connected_devices.len() == 1 {
+                                // Only one device, disconnect directly
+                                let (address, name) = &connected_devices[0];
+                                println!("Disconnecting from {}...", name);
+                                disconnect_device(address);
+                            } else {
+                                // Multiple devices, ask which one to disconnect
+                                println!("\nSelect a device to disconnect from:");
+                                for (index, (_, name)) in connected_devices.iter().enumerate() {
+                                    println!("  {}. {}", index + 1, name);
+                                }
+                                
+                                print!("Enter device number: ");
+                                io::stdout().flush().unwrap();
+                                let device_choice: String = read!("{}");
+                                
+                                if let Ok(idx) = device_choice.trim().parse::<usize>() {
+                                    if idx > 0 && idx <= connected_devices.len() {
+                                        let (address, name) = &connected_devices[idx - 1];
+                                        println!("Disconnecting from {}...", name);
+                                        disconnect_device(address);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Connect option (when no devices are connected)
+                            connect_to_device_menu();
+                        }
+                        wait_for_enter();
+                    }
+                },
+                '3' => {
+                    if power_status && !connected_devices.is_empty() {
+                        connect_to_device_menu();
+                        wait_for_enter();
+                    }
+                },
+                '6' => {
+                    if power_status {
+                        // Clear screen and show enhanced scanning interface
+                        let _ = term.clear_screen();
+                        println!("{}", style("Scanning for Bluetooth Devices").bold().cyan());
+                        println!("{}", style("===========================").cyan());
+                        println!("Scanning for 8 seconds...");
+                        
+                        // Enhanced scanning with separate menus for paired and new devices
+                        enhanced_scan_devices(8);
+                        
+                        println!("\nPress Enter to return to main menu...");
+                        wait_for_enter();
+                    }
+                },
+                't' => {
+                    if power_status {
+                        // Block Bluetooth at hardware level
+                        terminate_bluetooth_hardware();
+                        println!("Bluetooth adapter terminated at hardware level. Press Enter to continue...");
+                        wait_for_enter();
+                    }
+                },
+                's' | 'S' => {
+                    if !power_status {
+                        // Unblock Bluetooth at hardware level
+                        start_bluetooth_hardware();
+                        println!("Bluetooth adapter started at hardware level. Press Enter to continue...");
+                        wait_for_enter();
+                    }
+                },
+                'r' => {
+                    if power_status {
+                        // Restart Bluetooth at hardware level
+                        println!("Restarting Bluetooth adapter at hardware level...");
+                        terminate_bluetooth_hardware();
+                        thread::sleep(Duration::from_secs(1));
+                        start_bluetooth_hardware();
+                        println!("Bluetooth adapter restarted. Press Enter to continue...");
+                        wait_for_enter();
+                    }
+                },
+                'q' | 'Q' => break,
+                _ => {
+                    println!("Invalid option. Press Enter to continue...");
+                    wait_for_enter();
+                }
+            }
+        } else {
+            // Bluetooth is off, show limited menu
+            println!();
+            println!("{}", style("Options:").bold());
+            println!("  1. {}", style("Turn Bluetooth ON").green());
+            println!("  q. {}", style("Quit").red());
+            
+            // Get user choice without waiting for Enter
+            print!("\nEnter your choice: ");
+            io::stdout().flush().unwrap();
+            let choice = term.read_char().unwrap_or('x');
+            
+            match choice {
+                '1' => {
+                    power_on();
+                    println!("Turned Bluetooth ON. Press Enter to continue...");
+                    wait_for_enter();
+                },
+                'q' | 'Q' => break,
+                _ => {
+                    println!("Invalid option. Press Enter to continue...");
+                    wait_for_enter();
+                }
+            }
+        }
+    }
+}
+
+/// Present a menu to connect to a device
+fn connect_to_device_menu() {
+    let term = Term::stdout();
+    
+    // Get available devices
+    let available_devices = get_available_devices();
+    
+    if available_devices.is_empty() {
+        println!("No paired devices available. Scan first?");
+        return;
+    }
+    
+    println!("\nSelect a device to connect to:");
+    for (index, (_, name)) in available_devices.iter().enumerate() {
+        println!("  {}. {}", index + 1, name);
+    }
+    println!("  q. {}", style("Cancel").yellow());
+    
+    print!("Enter choice: ");
+    io::stdout().flush().unwrap();
+    let choice = term.read_char().unwrap_or('x');
+    
+    if choice == 'q' || choice == 'Q' {
+        println!("\nCanceled.");
+        return;
+    }
+    
+    // Convert char to number (1-9)
+    if let Some(digit) = choice.to_digit(10) {
+        let idx = digit as usize;
+        if idx > 0 && idx <= available_devices.len() {
+            let (address, name) = &available_devices[idx - 1];
+            println!("Connecting to {}...", name);
+            connect_device(address);
+        } else {
+            println!("Invalid selection.");
+        }
+    } else {
+        println!("Invalid selection.");
+    }
+}
+
+/// Wait for the user to press Enter
+fn wait_for_enter() {
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap();
+}
+
+/// Check if Bluetooth is powered on
+fn is_bluetooth_powered() -> bool {
+    match run_bluetoothctl(&["show"]) {
+        Ok(output) => output.contains("Powered: yes"),
+        Err(_) => false,
+    }
+}
+
+/// Get a list of connected devices
+fn get_connected_devices() -> Vec<(String, String)> {
+    let mut connected_devices = Vec::new();
+    
+    match run_bluetoothctl(&["devices"]) {
+        Ok(output) => {
+            for line in output.lines() {
+                if line.starts_with("Device") {
+                    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                    if parts.len() >= 3 {
+                        // Check if this device is connected
+                        if let Ok(device_info) = run_bluetoothctl(&["info", parts[1]]) {
+                            if device_info.contains("Connected: yes") {
+                                connected_devices.push((parts[1].to_string(), parts[2].to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        Err(_) => {},
+    }
+    
+    connected_devices
+}
+
+/// Get a list of all available (paired) devices
+fn get_available_devices() -> Vec<(String, String)> {
+    let mut available_devices = Vec::new();
+    
+    match run_bluetoothctl(&["devices"]) {
+        Ok(output) => {
+            for line in output.lines() {
+                if line.starts_with("Device") {
+                    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                    if parts.len() >= 3 {
+                        available_devices.push((parts[1].to_string(), parts[2].to_string()));
+                    }
+                }
+            }
+        },
+        Err(_) => {},
+    }
+    
+    available_devices
 }
 
 /// Display version information of the Bluetooth wrapper
